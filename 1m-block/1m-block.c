@@ -19,25 +19,20 @@ u_int32_t print_pkt(struct nfq_data *tb)
     ph = nfq_get_msg_packet_hdr(tb);
     if (ph) {
         id = ntohl(ph->packet_id);
-        printf("hw_protocol=0x%04x hook=%u id=%u ", ntohs(ph->hw_protocol), ph->hook, id);
     }
     return id;
 }
 
 // cb 함수 내부의 코드 수정
 static int cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
-              struct nfq_data *nfa, void *data)
+            struct nfq_data *nfa, void *data)
 {
     u_int32_t id = print_pkt(nfa);
-    printf("entering callback\n");
 
     unsigned char *payload;
     int payload_len = nfq_get_payload(nfa, &payload);
-    if (payload_len >= 0) {
-        printf("payload_len=%d\n", payload_len);
-    }
-
     struct iphdr *ip_header = (struct iphdr *)payload;
+    
     if (ip_header->protocol == 6) { // TCP
         struct tcphdr *tcp_header = (struct tcphdr *)(payload + (ip_header->ihl << 2));
         char *http_payload = (char *)(payload + (ip_header->ihl << 2) + (tcp_header->doff << 2));
@@ -52,7 +47,7 @@ static int cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
                 // Check if the extracted host is in the blocked_domains list
                 for (size_t i = 0; i < num_blocked_domains; i++) {
                     if (strcmp(host_start, blocked_domains[i]) == 0) {
-                        printf("Blocking packet\n");
+                        printf("Blocking packet from domain: %s\n", blocked_domains[i]);
                         return nfq_set_verdict(qh, id, NF_DROP, 0, NULL);
                     }
                 }
