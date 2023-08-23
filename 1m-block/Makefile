@@ -2,7 +2,8 @@ LDLIBS += -lnetfilter_queue
 
 all: 1m-block
 
-pcap-test: 1m-block.c
+1m-block: 1m-block.c
+	$(CC) $(CFLAGS) $< -o $@ $(LDLIBS)
 
-clean: rm -f 1m-block *.o
-
+clean:
+	rm -f 1m-block *.o
