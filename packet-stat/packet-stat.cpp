@@ -11,16 +11,20 @@
 #include <netinet/tcp.h>
 #include <netinet/udp.h>
 
-struct IPStats {
-    unsigned int sendPackets = 0;
-    unsigned int receivePackets = 0;
-    unsigned int sendBytes = 0;
-    unsigned int receiveBytes = 0;
+struct EndpointStats {
+    unsigned int packets = 0;
+    unsigned int bytes = 0;
 };
 
-std::map<std::string, IPStats> ipStatsMap;
+// 새로운 구조체 ConversationStats 추가
+struct ConversationStats {
+    EndpointStats src;
+    EndpointStats dst;
+};
 
-// MAC 주소를 문자열로 변환
+std::map<std::string, EndpointStats> macStatsMap; // MAC 주소별 통계
+std::map<std::string, ConversationStats> conversationStatsMap; // 대화(Conversation)별 통계
+
 std::string macToString(const u_char* addr) {
     std::ostringstream oss;
     oss << std::hex << std::setfill('0');
@@ -32,26 +36,56 @@ std::string macToString(const u_char* addr) {
 }
 
 void packetHandler(const struct pcap_pkthdr *header, const u_char *packet) {
-    const struct ip *ipHeader = (const struct ip *)(packet + sizeof(struct ether_header));
-    std::string srcIP = inet_ntoa(ipHeader->ip_src);
-    std::string dstIP = inet_ntoa(ipHeader->ip_dst);
-    unsigned int bytes = header->len;
+    const struct ether_header *ethHeader = reinterpret_cast<const struct ether_header*>(packet);
+    std::string srcMAC = macToString(ethHeader->ether_shost);
+    std::string dstMAC = macToString(ethHeader->ether_dhost);
 
-    ipStatsMap[srcIP].sendPackets++;
-    ipStatsMap[srcIP].sendBytes += bytes;
+    // MAC 주소별 통계 업데이트
+    macStatsMap[srcMAC].packets++;
+    macStatsMap[srcMAC].bytes += header->len;
+    macStatsMap[dstMAC].packets++;
+    macStatsMap[dstMAC].bytes += header->len;
 
-    ipStatsMap[dstIP].receivePackets++;
-    ipStatsMap[dstIP].receiveBytes += bytes;
+    // IP 헤더 및 프로토콜 확인
+    const struct ip *ipHeader = reinterpret_cast<const struct ip*>(packet + sizeof(struct ether_header));
+    u_int8_t protocol = ipHeader->ip_p;
+
+    // Conversation 식별자 생성 (srcIP:srcPort-dstIP:dstPort)
+    std::ostringstream conversationKeyStream;
+    if (protocol == IPPROTO_TCP) {
+        const struct tcphdr *tcpHeader = reinterpret_cast<const struct tcphdr*>(packet + sizeof(struct ether_header) + sizeof(struct ip));
+        conversationKeyStream << inet_ntoa(ipHeader->ip_src) << ":" << ntohs(tcpHeader->th_sport) << "-"
+                              << inet_ntoa(ipHeader->ip_dst) << ":" << ntohs(tcpHeader->th_dport);
+    } else if (protocol == IPPROTO_UDP) {
+        const struct udphdr *udpHeader = reinterpret_cast<const struct udphdr*>(packet + sizeof(struct ether_header) + sizeof(struct ip));
+        conversationKeyStream << inet_ntoa(ipHeader->ip_src) << ":" << ntohs(udpHeader->uh_sport) << "-"
+                              << inet_ntoa(ipHeader->ip_dst) << ":" << ntohs(udpHeader->uh_dport);
+    }
+
+    std::string conversationKey = conversationKeyStream.str();
+
+    // Conversation별 통계 업데이트
+    conversationStatsMap[conversationKey].src.packets++;
+    conversationStatsMap[conversationKey].src.bytes += header->len;
+    conversationStatsMap[conversationKey].dst.packets++;
+    conversationStatsMap[conversationKey].dst.bytes += header->len;
 }
 
 void printStats() {
-    std::cout << "IPv4 Statistics:\n";
-    for (const auto &entry : ipStatsMap) {
-        std::cout << "IP Address: " << entry.first
-                  << ", Send Packets: " << entry.second.sendPackets
-                  << ", Receive Packets: " << entry.second.receivePackets
-                  << ", Send Bytes: " << entry.second.sendBytes
-                  << ", Receive Bytes: " << entry.second.receiveBytes << std::endl;
+    std::cout << "MAC Statistics:\n";
+    for (const auto &entry : macStatsMap) {
+        std::cout << "MAC Address: " << entry.first
+                  << ", Packets: " << entry.second.packets
+                  << ", Bytes: " << entry.second.bytes << std::endl;
+    }
+
+    std::cout << "\nConversation Statistics:\n";
+    for (const auto &entry : conversationStatsMap) {
+        std::cout << "Conversation: " << entry.first
+                  << ", Src Packets: " << entry.second.src.packets
+                  << ", Src Bytes: " << entry.second.src.bytes
+                  << ", Dst Packets: " << entry.second.dst.packets
+                  << ", Dst Bytes: " << entry.second.dst.bytes << std::endl;
     }
 }
 
