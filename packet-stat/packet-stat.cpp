@@ -49,19 +49,16 @@ void packetHandler(const struct pcap_pkthdr *header, const u_char *packet) {
     std::string srcMAC = macToString(ethHeader->ether_shost);
     std::string dstMAC = macToString(ethHeader->ether_dhost);
 
-    // Update MAC statistics
     macStatsMap[srcMAC].packets_sent++;
     macStatsMap[dstMAC].packets_received++;
     macStatsMap[srcMAC].bytes_sent += header->len;
     macStatsMap[dstMAC].bytes_received += header->len;
 
-    // Update IP statistics
     ipStatsMap[srcIP].packets_sent++;
     ipStatsMap[dstIP].packets_received++;
     ipStatsMap[srcIP].bytes_sent += header->len;
     ipStatsMap[dstIP].bytes_received += header->len;
 
-    // Extract protocol and port information for TCP and UDP packets
     std::string protocol;
     uint16_t srcPort = 0, dstPort = 0;
     if (ipHeader->ip_p == IPPROTO_TCP) {
@@ -78,7 +75,6 @@ void packetHandler(const struct pcap_pkthdr *header, const u_char *packet) {
         protocol = "Unknown";
     }
 
-    // Update conversation statistics
     std::string conversationKey = srcIP + "-" + std::to_string(srcPort) + "-" + dstIP + "-" + std::to_string(dstPort) + "-" + protocol;
     conversationStatsMap[conversationKey].src_ip = srcIP;
     conversationStatsMap[conversationKey].dst_ip = dstIP;
