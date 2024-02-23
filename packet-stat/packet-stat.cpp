@@ -12,18 +12,23 @@
 #include <netinet/udp.h>
 
 struct EndpointStats {
-    unsigned int packets = 0;
-    unsigned int bytes = 0;
+    unsigned int packets_sent = 0;
+    unsigned int packets_received = 0;
+    unsigned int bytes_sent = 0;
+    unsigned int bytes_received = 0;
 };
 
-// 새로운 구조체 ConversationStats 추가
 struct ConversationStats {
-    EndpointStats src;
-    EndpointStats dst;
+    std::string src_ip;
+    std::string dst_ip;
+    std::string protocol;
+    uint16_t src_port;
+    uint16_t dst_port;
 };
 
-std::map<std::string, EndpointStats> macStatsMap; // MAC 주소별 통계
-std::map<std::string, ConversationStats> conversationStatsMap; // 대화(Conversation)별 통계
+std::map<std::string, EndpointStats> ipStatsMap;
+std::map<std::string, EndpointStats> macStatsMap;
+std::map<std::string, ConversationStats> conversationStatsMap;
 
 std::string macToString(const u_char* addr) {
     std::ostringstream oss;
@@ -37,56 +42,72 @@ std::string macToString(const u_char* addr) {
 
 void packetHandler(const struct pcap_pkthdr *header, const u_char *packet) {
     const struct ether_header *ethHeader = reinterpret_cast<const struct ether_header*>(packet);
+    const struct ip *ipHeader = reinterpret_cast<const struct ip*>(packet + sizeof(struct ether_header));
+    std::string srcIP = inet_ntoa(ipHeader->ip_src);
+    std::string dstIP = inet_ntoa(ipHeader->ip_dst);
+
     std::string srcMAC = macToString(ethHeader->ether_shost);
     std::string dstMAC = macToString(ethHeader->ether_dhost);
 
-    // MAC 주소별 통계 업데이트
-    macStatsMap[srcMAC].packets++;
-    macStatsMap[srcMAC].bytes += header->len;
-    macStatsMap[dstMAC].packets++;
-    macStatsMap[dstMAC].bytes += header->len;
+    // Update MAC statistics
+    macStatsMap[srcMAC].packets_sent++;
+    macStatsMap[dstMAC].packets_received++;
+    macStatsMap[srcMAC].bytes_sent += header->len;
+    macStatsMap[dstMAC].bytes_received += header->len;
 
-    // IP 헤더 및 프로토콜 확인
-    const struct ip *ipHeader = reinterpret_cast<const struct ip*>(packet + sizeof(struct ether_header));
-    u_int8_t protocol = ipHeader->ip_p;
+    // Update IP statistics
+    ipStatsMap[srcIP].packets_sent++;
+    ipStatsMap[dstIP].packets_received++;
+    ipStatsMap[srcIP].bytes_sent += header->len;
+    ipStatsMap[dstIP].bytes_received += header->len;
 
-    // Conversation 식별자 생성 (srcIP:srcPort-dstIP:dstPort)
-    std::ostringstream conversationKeyStream;
-    if (protocol == IPPROTO_TCP) {
-        const struct tcphdr *tcpHeader = reinterpret_cast<const struct tcphdr*>(packet + sizeof(struct ether_header) + sizeof(struct ip));
-        conversationKeyStream << inet_ntoa(ipHeader->ip_src) << ":" << ntohs(tcpHeader->th_sport) << "-"
-                              << inet_ntoa(ipHeader->ip_dst) << ":" << ntohs(tcpHeader->th_dport);
-    } else if (protocol == IPPROTO_UDP) {
-        const struct udphdr *udpHeader = reinterpret_cast<const struct udphdr*>(packet + sizeof(struct ether_header) + sizeof(struct ip));
-        conversationKeyStream << inet_ntoa(ipHeader->ip_src) << ":" << ntohs(udpHeader->uh_sport) << "-"
-                              << inet_ntoa(ipHeader->ip_dst) << ":" << ntohs(udpHeader->uh_dport);
+    // Extract protocol and port information for TCP and UDP packets
+    std::string protocol;
+    uint16_t srcPort = 0, dstPort = 0;
+    if (ipHeader->ip_p == IPPROTO_TCP) {
+        const struct tcphdr *tcpHeader = reinterpret_cast<const struct tcphdr*>(packet + sizeof(struct ether_header) + ipHeader->ip_hl * 4);
+        srcPort = ntohs(tcpHeader->th_sport);
+        dstPort = ntohs(tcpHeader->th_dport);
+        protocol = "TCP";
+    } else if (ipHeader->ip_p == IPPROTO_UDP) {
+        const struct udphdr *udpHeader = reinterpret_cast<const struct udphdr*>(packet + sizeof(struct ether_header) + ipHeader->ip_hl * 4);
+        srcPort = ntohs(udpHeader->uh_sport);
+        dstPort = ntohs(udpHeader->uh_dport);
+        protocol = "UDP";
+    } else {
+        protocol = "Unknown";
     }
 
-    std::string conversationKey = conversationKeyStream.str();
-
-    // Conversation별 통계 업데이트
-    conversationStatsMap[conversationKey].src.packets++;
-    conversationStatsMap[conversationKey].src.bytes += header->len;
-    conversationStatsMap[conversationKey].dst.packets++;
-    conversationStatsMap[conversationKey].dst.bytes += header->len;
+    // Update conversation statistics
+    std::string conversationKey = srcIP + "-" + std::to_string(srcPort) + "-" + dstIP + "-" + std::to_string(dstPort) + "-" + protocol;
+    conversationStatsMap[conversationKey].src_ip = srcIP;
+    conversationStatsMap[conversationKey].dst_ip = dstIP;
+    conversationStatsMap[conversationKey].protocol = protocol;
+    conversationStatsMap[conversationKey].src_port = srcPort;
+    conversationStatsMap[conversationKey].dst_port = dstPort;
 }
 
 void printStats() {
-    std::cout << "MAC Statistics:\n";
+    std::cout << "[Ethernet]\n";
     for (const auto &entry : macStatsMap) {
-        std::cout << "MAC Address: " << entry.first
-                  << ", Packets: " << entry.second.packets
-                  << ", Bytes: " << entry.second.bytes << std::endl;
+        std::cout << "MAC Address: " << entry.first << "\n";
     }
 
-    std::cout << "\nConversation Statistics:\n";
-    for (const auto &entry : conversationStatsMap) {
-        std::cout << "Conversation: " << entry.first
-                  << ", Src Packets: " << entry.second.src.packets
-                  << ", Src Bytes: " << entry.second.src.bytes
-                  << ", Dst Packets: " << entry.second.dst.packets
-                  << ", Dst Bytes: " << entry.second.dst.bytes << std::endl;
+    std::cout << "\n[IPv4]\n";
+    for (const auto &entry : ipStatsMap) {
+        std::cout << "IP Address : " << entry.first
+                  << " , 송신 패킷 개수 : " << entry.second.packets_sent
+                  << " , 수신 패킷 개수 : " << entry.second.packets_received
+                  << " , 송신 패킷 바이트 : " << entry.second.bytes_sent
+                  << " , 수신 패킷 바이트 : " << entry.second.bytes_received << std::endl;
     }
+
+		std::cout << "\n[Conversation]\n";
+		for (const auto &entry : conversationStatsMap) {
+		    std::cout << "Source IP: " << entry.second.src_ip << "(" << entry.second.src_port << ")"
+		              << " - Destination IP: " << entry.second.dst_ip << "(" << entry.second.dst_port << ")"
+		              << " , Protocol: " << entry.second.protocol << std::endl;
+	}
 }
 
 int main(int argc, char *argv[]) {
@@ -114,4 +135,3 @@ int main(int argc, char *argv[]) {
     
     return 0;
 }
-
